@@ -11,9 +11,10 @@ import (
 	"math/big"
 
 	"github.com/binance-chain/tss-lib/common"
+	"golang.org/x/crypto/sha3"
 )
 
-const Iterations = 12
+const Iterations = 24
 
 var (
 	zero = big.NewInt(0)
@@ -271,4 +272,31 @@ func (pf *Proof) Verify(challenges []*big.Int, omega, NTildei *big.Int) bool {
 	vXis := verifyXis(pf.Xis, yis, pf.Ais, pf.Bis, NTildei, omega)
 	vZi := verifyZis(zis, yis, NTildei)
 	return vXis && vZi
+}
+
+func GenChallenges(NTildei *big.Int, omegas []*big.Int) ([]*big.Int, error) {
+	if NTildei == nil {
+		return nil, errors.New("invalid input")
+	}
+	challengeBz := make([]byte, 32)
+	var challenges []*big.Int
+	hash := sha3.New256()
+	for _, el := range omegas {
+		_, err := hash.Write(el.Bytes())
+		if err != nil {
+			return nil, err
+		}
+	}
+	omegaHAsh := hash.Sum(nil)
+	cShakeHash := sha3.NewCShake256(NTildei.Bytes(), omegaHAsh)
+	_, err := cShakeHash.Write(hash.Sum(NTildei.Bytes()))
+	if err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < Iterations; i++ {
+		cShakeHash.Read(challengeBz)
+		challenges = append(challenges, new(big.Int).SetBytes(challengeBz))
+	}
+	return challenges, nil
 }
