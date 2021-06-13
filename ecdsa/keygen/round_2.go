@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"sync"
 
+	"github.com/binance-chain/tss-lib/crypto/safeparameter"
 	"github.com/binance-chain/tss-lib/tss"
 )
 
@@ -24,11 +25,11 @@ func (round *round2) Start() *tss.Error {
 	round.resetOK()
 
 	i := round.PartyID().Index
-
 	// 6. verify dln proofs, store r1 message pieces, ensure uniqueness of h1j, h2j
 	h1H2Map := make(map[string]struct{}, len(round.temp.kgRound1Messages)*2)
 	dlnProof1FailCulprits := make([]*tss.PartyID, len(round.temp.kgRound1Messages))
 	dlnProof2FailCulprits := make([]*tss.PartyID, len(round.temp.kgRound1Messages))
+	paramProof2FailCulprits := make([]*tss.PartyID, len(round.temp.kgRound1Messages))
 	wg := new(sync.WaitGroup)
 	for j, msg := range round.temp.kgRound1Messages {
 		r1msg := msg.Content().(*KGRound1Message)
@@ -50,7 +51,21 @@ func (round *round2) Start() *tss.Error {
 			}
 			h1H2Map[h1JHex], h1H2Map[h2JHex] = struct{}{}, struct{}{}
 		}
-		wg.Add(2)
+
+		omegaBz := round.temp.kgRound0Messages[j].Content().(*KGRound0Message).Omega
+		omega := new(big.Int).SetBytes(omegaBz)
+		challenges, err := safeparameter.GenChallenges(NTildej, round.temp.omegas)
+		if err != nil {
+			return round.WrapError(errors.New("fail to generate the challenges"), msg.GetFrom())
+		}
+		wg.Add(3)
+		go func(j int, msg tss.ParsedMessage, r1msg *KGRound1Message, H1j, H2j, NTildej *big.Int) {
+			if paramProof, err := r1msg.UnmarshalParamProof(); err != nil || !paramProof.Verify(challenges, omega, NTildej) {
+				paramProof2FailCulprits[j] = msg.GetFrom()
+			}
+			wg.Done()
+		}(j, msg, r1msg, H1j, H2j, NTildej)
+
 		go func(j int, msg tss.ParsedMessage, r1msg *KGRound1Message, H1j, H2j, NTildej *big.Int) {
 			if dlnProof1, err := r1msg.UnmarshalDLNProof1(); err != nil || !dlnProof1.Verify(H1j, H2j, NTildej) {
 				dlnProof1FailCulprits[j] = msg.GetFrom()
@@ -65,9 +80,11 @@ func (round *round2) Start() *tss.Error {
 		}(j, msg, r1msg, H1j, H2j, NTildej)
 	}
 	wg.Wait()
-	for _, culprit := range append(dlnProof1FailCulprits, dlnProof2FailCulprits...) {
+	culprits := append(dlnProof1FailCulprits, paramProof2FailCulprits...)
+	culprits = append(culprits, dlnProof2FailCulprits...)
+	for _, culprit := range culprits {
 		if culprit != nil {
-			return round.WrapError(errors.New("dln proof verification failed"), culprit)
+			return round.WrapError(errors.New("dln or parameter proof verification failed"), culprit)
 		}
 	}
 	// save NTilde_j, h1_j, h2_j, ...
